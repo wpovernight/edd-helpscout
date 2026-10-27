@@ -20,9 +20,15 @@ class Endpoint {
 	private $data;
 
 	/**
-	 * @var bool|obj
+	 * Original request bytes used to verify Help Scout's signature.
+	 * @var string
 	 */
-	private $edd_customer = false;
+	private $raw_body = '';
+
+	/**
+	 * @var array
+	 */
+	private $edd_customers = array();
 
 	/**
 	 * @var array
@@ -44,7 +50,7 @@ class Endpoint {
 				
 		// validate request
 		if ( ! $this->validate() ) {
-			$this->respond( 'Invalid signature' );
+			$this->respond( 'Invalid signature or customer data', 401 );
 			exit;
 		}
 
@@ -72,7 +78,7 @@ class Endpoint {
 		/**
 		 * use dummy data, e.g. for local environments
 		 */
-		if( defined( 'HELPSCOUT_DUMMY_DATA' ) ){
+		if ( $this->is_dummy_mode() ) {
 			$email = defined( 'HELPSCOUT_DUMMY_DATA_EMAIL' ) ? HELPSCOUT_DUMMY_DATA_EMAIL : 'user@example.com';
 		
 			$data = array(
@@ -90,16 +96,15 @@ class Endpoint {
 				),
 			);
 		} else {
-			$data_string = file_get_contents( 'php://input' );
-			$data        = json_decode( $data_string, true );
-
-			// populate the "emails" array if only "email" is given
-			if ( isset( $data['customer']['email'] ) && ! isset( $data['customer']['emails'] ) ) {
-				$data['customer']['emails'] = array( $data['customer']['email'] );
-			}
+			$this->raw_body = (string) file_get_contents( 'php://input' );
+			$data           = json_decode( $this->raw_body, true );
 		}
 
 		return $data;
+	}
+
+	private function is_dummy_mode() {
+		return defined( 'HELPSCOUT_DUMMY_DATA' ) && true === HELPSCOUT_DUMMY_DATA;
 	}
 
 	/**
@@ -112,19 +117,34 @@ class Endpoint {
 	 */
 	private function validate() {
 
-		// we need at least this
+		// Signatures cover the original body, not a re-encoded or normalized payload.
+		if ( ! $this->is_dummy_mode() ) {
+			$signature = $_SERVER['HTTP_X_HELPSCOUT_SIGNATURE'] ?? '';
+			$expected  = base64_encode( hash_hmac( 'sha1', $this->raw_body, HELPSCOUT_SECRET_KEY, true ) );
+			if ( ! is_string( $signature ) || ! hash_equals( $expected, $signature ) ) {
+				return false;
+			}
+		}
+
+		if ( ! is_array( $this->data ) || empty( $this->data['customer'] ) || ! is_array( $this->data['customer'] ) ) {
+			return false;
+		}
+
+		// Normalize only after authentication, including email-only callbacks.
+		if ( isset( $this->data['customer']['email'] ) && ! isset( $this->data['customer']['emails'] ) ) {
+			$this->data['customer']['emails'] = array( $this->data['customer']['email'] );
+		}
+
 		if ( empty( $this->data['customer']['emails'] ) || ! is_array( $this->data['customer']['emails'] ) ) {
 			return false;
 		}
-			
-		// check request signature
-		$request = new Request( $this->data );
-
-		if ( defined( 'HELPSCOUT_DUMMY_DATA' ) || ( isset( $_SERVER['HTTP_X_HELPSCOUT_SIGNATURE'] ) && $request->signature_equals( $_SERVER['HTTP_X_HELPSCOUT_SIGNATURE'] ) ) ) {
-			return true;
+		foreach ( $this->data['customer']['emails'] as $email ) {
+			if ( ! is_string( $email ) || ! is_email( $email ) ) {
+				return false;
+			}
 		}
 
-		return false;
+		return true;
 	}
 
 	/**
@@ -211,7 +231,10 @@ class Endpoint {
 			 */
 			$results = edd_get_orders( array(
 				'type'      => 'sale',
-				'email__in' => $this->customer_emails
+				'email__in' => $this->customer_emails,
+				'number'    => 0, // EDD 3 uses zero for an unlimited query.
+				'orderby'   => 'id',
+				'order'     => 'DESC',
 			) );
 		} else {
 			/**
@@ -264,7 +287,7 @@ class Endpoint {
 
 	private function get_customer_orders() {
 		$orders = array();
-		foreach ( $this->query_customer_payments() as $payment_id_or_order ) {
+		foreach ( $this->customer_payments as $payment_id_or_order ) {
 			$payment = $payment_id_or_order instanceof Order ? $payment_id_or_order : new EDD_Payment( $payment_id_or_order );
 			$order_items = array();
 			if ( $payment instanceof Order ) {
@@ -272,7 +295,7 @@ class Endpoint {
 				foreach ( $payment->get_items() as $order_item ) {
 					$order_items[ $order_item->cart_index ] = array(
 						'title'        => $order_item->product_name,
-						'price_option' => ! empty( $order_item->price_id ) ? edd_get_price_name( $order_item->price_id ) : '',
+						'price_option' => isset( $order_item->price_id ) ? edd_get_price_option_name( $order_item->product_id, $order_item->price_id, $payment->ID ) : '',
 						'is_upgrade'   => (bool) edd_get_order_item_meta( $order_item->id, '_option_is_upgrade', true ),
 						'files'        => edd_get_download_files( $order_item->product_id, $order_item->price_id ),
 						'product_id'   => $order_item->product_id,
@@ -388,6 +411,13 @@ class Endpoint {
 		if ( !empty( $customer_licenses ) ) {
 			foreach ( $customer_licenses as $license_id ) {
 				$license = edd_software_licensing()->get_license( (int) $license_id );
+				if ( ! $license ) {
+					continue;
+				}
+				$download = $license->get_download();
+				if ( ! $download || ! $download->get_ID() ) {
+					continue;
+				}
 				switch ($license->status) {
 					case 'active':
 						$status_color = 'green';
@@ -407,7 +437,7 @@ class Endpoint {
 				$license_data = array(
 					'key'               => $license->key,
 					'url'               => esc_url( admin_url( 'edit.php?post_type=download&page=edd-licenses&view=overview&license_id=' . $license->ID ) ),
-					'title'             => $license->get_download()->get_name(),
+					'title'             => $download->get_name(),
 					'price_option'      => '',
 					'status'            => $license->status,
 					'status_color'      => $status_color,
@@ -423,8 +453,8 @@ class Endpoint {
 					'show_activations'  => true,
 				);
 
-				if( $license->get_download()->has_variable_prices() && empty( $license->parent ) ) {
-					$prices   = $license->get_download()->get_prices();
+				if( $download->has_variable_prices() && empty( $license->parent ) ) {
+					$prices   = $download->get_prices();
 					if ( isset( $prices[ $license->price_id ] ) ) {
 						$license_data['price_option'] = $prices[ $license->price_id ]['name'];
 					}
@@ -463,7 +493,7 @@ class Endpoint {
 				}
 
 				// move child licenses to parent
-				if ( ! empty( $license->parent ) ) {
+				if ( ! empty( $license->parent ) && isset( $licenses[ $license->parent ]['key'] ) ) {
 					$children = ! empty( $licenses[$license->parent]['children'] ) ? $licenses[$license->parent]['children'] : array();
 					$children = $children + array( $license->ID => $license_data );
 					$licenses[$license->parent]['children'] = $children;

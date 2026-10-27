@@ -43,6 +43,9 @@ class Request {
 	 * @return bool
 	 */
 	public function signature_equals( $signature ) {
+		if ( ! is_string( $signature ) ) {
+			return false;
+		}
 
 		// use `hash_equals( str1, str2 )` if it exists
 		if( function_exists( 'hash_equals' ) ) {
