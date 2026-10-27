@@ -4,7 +4,7 @@ Tags: easy-digital-downloads,edd,helpscout,support,help scout
 Requires at least: 5.0
 Tested up to: 6.1
 Requires PHP: 7.2
-Stable tag: 2.3.0
+Stable tag: 2.4.0
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -89,6 +89,16 @@ Make sure the "Secret Key" setting for your Help Scout application matches the v
 3. Subscriptions with status and links to the store
 
 == Changelog ==
+
+= 2.4.0 =
+
+- Fix: validate Help Scout callback signatures against the original request body before normalizing customer data.
+- Fix: declare the customer collection to avoid PHP 8.2+ dynamic-property deprecations.
+- Fix: retrieve complete EDD 3 order history once instead of limiting it to 30 orders.
+- Fix: show variable-price labels in EDD 3, including price option zero.
+- Fix: enable dummy mode only when HELPSCOUT_DUMMY_DATA is explicitly true.
+- Fix: handle missing licenses, deleted products, and missing parent licenses safely.
+- Fix: reject malformed callback data and non-string action signatures without PHP errors.
 
 = 2.3.0 =
 
